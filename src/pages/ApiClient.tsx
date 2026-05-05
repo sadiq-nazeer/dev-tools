@@ -1,10 +1,11 @@
 import { useState, useCallback } from 'react';
-import { Send, Plus, Trash2, Clock, BookmarkPlus, History, Bookmark, X } from 'lucide-react';
+import { Send, Plus, Trash2, Clock, BookmarkPlus, History, Bookmark, X, FileJson } from 'lucide-react';
 import { ToolLayout } from '../components/layout/ToolLayout';
 import { usePersistentState } from '../hooks/usePersistentState';
 import { useToolPageMeta } from '../hooks/useToolPageMeta';
 import Editor from '@monaco-editor/react';
 import { cn } from '../lib/utils';
+import { load as parseYaml } from 'js-yaml';
 
 interface Header { id: string; key: string; value: string; enabled: boolean }
 
@@ -25,6 +26,33 @@ interface SavedRequest {
     body: string;
 }
 
+interface OpenApiOperation {
+    id: string;
+    method: string;
+    path: string;
+    name: string;
+    description: string;
+    tags: string[];
+    bodyTemplate: string;
+    headers: Header[];
+}
+
+interface OpenApiParseResult {
+    baseUrl: string;
+    operations: OpenApiOperation[];
+}
+
+type OpenApiPathItem = Partial<Record<'get' | 'post' | 'put' | 'patch' | 'delete' | 'head' | 'options', OpenApiOperationObject>>;
+interface OpenApiOperationObject {
+    summary?: string;
+    description?: string;
+    operationId?: string;
+    tags?: string[];
+    requestBody?: {
+        content?: Record<string, { example?: unknown; examples?: Record<string, { value?: unknown }>; schema?: Record<string, unknown> }>;
+    };
+}
+
 const METHOD_COLORS: Record<string, string> = {
     GET: 'text-green-500', POST: 'text-blue-500', PUT: 'text-yellow-500',
     PATCH: 'text-orange-500', DELETE: 'text-red-500', HEAD: 'text-purple-500', OPTIONS: 'text-gray-500',
@@ -33,6 +61,72 @@ const METHOD_COLORS: Record<string, string> = {
 function formatTimestamp(ts: number): string {
     const d = new Date(ts);
     return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function safeJson(value: unknown): string {
+    if (value === undefined) return '';
+    if (typeof value === 'string') return value;
+    try {
+        return JSON.stringify(value, null, 2);
+    } catch {
+        return '';
+    }
+}
+
+function parseOpenApiDocument(doc: unknown): OpenApiParseResult {
+    if (!doc || typeof doc !== 'object') {
+        throw new Error('Invalid OpenAPI document.');
+    }
+
+    const documentRecord = doc as {
+        paths?: Record<string, OpenApiPathItem>;
+        servers?: Array<{ url?: string }>;
+    };
+
+    const paths = documentRecord.paths;
+    if (!paths || typeof paths !== 'object') {
+        throw new Error('OpenAPI document has no paths.');
+    }
+
+    const baseUrl = documentRecord.servers?.[0]?.url ?? '';
+    const methods: Array<keyof OpenApiPathItem> = ['get', 'post', 'put', 'patch', 'delete', 'head', 'options'];
+    const operations: OpenApiOperation[] = [];
+
+    Object.entries(paths).forEach(([path, pathItem]) => {
+        if (!pathItem || typeof pathItem !== 'object') return;
+        methods.forEach((method) => {
+            const operation = pathItem[method];
+            if (!operation) return;
+            const content = operation.requestBody?.content ?? {};
+            const jsonBody =
+                content['application/json']?.example ??
+                Object.values(content)[0]?.example ??
+                Object.values(content)[0]?.examples?.[Object.keys(Object.values(content)[0]?.examples ?? {})[0]]?.value;
+
+            const mappedHeaders: Header[] = [];
+            if (Object.keys(content).length > 0) {
+                mappedHeaders.push({
+                    id: `content-${Math.random().toString(36).slice(2)}`,
+                    key: 'Content-Type',
+                    value: Object.keys(content)[0],
+                    enabled: true,
+                });
+            }
+
+            operations.push({
+                id: `${method.toUpperCase()} ${path}`,
+                method: method.toUpperCase(),
+                path,
+                name: operation.summary ?? operation.operationId ?? `${method.toUpperCase()} ${path}`,
+                description: operation.description ?? '',
+                tags: operation.tags ?? [],
+                bodyTemplate: safeJson(jsonBody),
+                headers: mappedHeaders,
+            });
+        });
+    });
+
+    return { baseUrl, operations };
 }
 
 export default function ApiClient() {
@@ -50,9 +144,16 @@ export default function ApiClient() {
 
     const [history, setHistory] = usePersistentState<HistoryEntry[]>('api_history', []);
     const [saved, setSaved] = usePersistentState<SavedRequest[]>('api_saved', []);
-    const [panel, setPanel] = useState<'none' | 'history' | 'saved'>('none');
+    const [panel, setPanel] = useState<'none' | 'history' | 'saved' | 'openapi'>('none');
     const [savePrompt, setSavePrompt] = useState(false);
     const [saveName, setSaveName] = useState('');
+    const [openApiUrl, setOpenApiUrl] = usePersistentState<string>('api_openapi_url', '');
+    const [openApiText, setOpenApiText] = usePersistentState<string>('api_openapi_text', '');
+    const [openApiBaseUrl, setOpenApiBaseUrl] = useState('');
+    const [openApiOps, setOpenApiOps] = useState<OpenApiOperation[]>([]);
+    const [openApiError, setOpenApiError] = useState<string | null>(null);
+    const [bearerToken, setBearerToken] = usePersistentState<string>('api_bearer_token', '');
+    const [sendCredentials, setSendCredentials] = usePersistentState<boolean>('api_send_credentials', false);
 
     const addHeader = () => setHeaders([...headers, { id: Math.random().toString(36).substr(2, 9), key: '', value: '', enabled: true }]);
     const removeHeader = (id: string) => setHeaders(headers.filter(h => h.id !== id));
@@ -66,6 +167,76 @@ export default function ApiClient() {
         setPanel('none');
     };
 
+    const applyOpenApiOperation = (operation: OpenApiOperation) => {
+        const normalizedBase = openApiBaseUrl.replace(/\/$/, '');
+        const normalizedPath = operation.path.startsWith('/') ? operation.path : `/${operation.path}`;
+        setMethod(operation.method);
+        setUrl(normalizedBase ? `${normalizedBase}${normalizedPath}` : normalizedPath);
+        setHeaders(
+            operation.headers.length > 0
+                ? operation.headers
+                : [{ id: `header-${Math.random().toString(36).slice(2)}`, key: '', value: '', enabled: true }]
+        );
+        setBody(operation.bodyTemplate);
+        setPanel('none');
+    };
+
+    const applyBearerTokenHeader = useCallback((inputHeaders: Header[]): Header[] => {
+        const withoutAuth = inputHeaders.filter((header) => header.key.toLowerCase() !== 'authorization');
+        const trimmedToken = bearerToken.trim();
+        if (!trimmedToken) return withoutAuth;
+        return [
+            ...withoutAuth,
+            {
+                id: `auth-${Math.random().toString(36).slice(2)}`,
+                key: 'Authorization',
+                value: `Bearer ${trimmedToken}`,
+                enabled: true,
+            },
+        ];
+    }, [bearerToken]);
+
+    const parseOpenApiText = (rawSpec: string) => {
+        const trimmed = rawSpec.trim();
+        if (!trimmed) {
+            setOpenApiError('OpenAPI input is empty.');
+            return;
+        }
+
+        try {
+            const parsed = trimmed.startsWith('{') ? JSON.parse(trimmed) : parseYaml(trimmed);
+            const result = parseOpenApiDocument(parsed);
+            setOpenApiBaseUrl(result.baseUrl);
+            setOpenApiOps(result.operations);
+            setOpenApiError(result.operations.length ? null : 'No operations found in spec.');
+        } catch (e: unknown) {
+            setOpenApiOps([]);
+            setOpenApiBaseUrl('');
+            setOpenApiError(e instanceof Error ? e.message : 'Failed to parse OpenAPI spec.');
+        }
+    };
+
+    const loadOpenApiFromUrl = async () => {
+        setOpenApiError(null);
+        if (!openApiUrl.trim()) {
+            setOpenApiError('Enter an OpenAPI URL first.');
+            return;
+        }
+        try {
+            const res = await fetch(openApiUrl);
+            if (!res.ok) {
+                throw new Error(`Unable to fetch spec (${res.status}).`);
+            }
+            const raw = await res.text();
+            setOpenApiText(raw);
+            parseOpenApiText(raw);
+        } catch (e: unknown) {
+            setOpenApiOps([]);
+            setOpenApiBaseUrl('');
+            setOpenApiError(e instanceof Error ? e.message : 'Failed to fetch OpenAPI URL.');
+        }
+    };
+
     const sendRequest = useCallback(async () => {
         setIsLoading(true);
         setError(null);
@@ -74,9 +245,10 @@ export default function ApiClient() {
         const startTime = performance.now();
         let finalStatus: number | null = null;
         try {
+            const resolvedHeaders = applyBearerTokenHeader(headers);
             const requestHeaders: Record<string, string> = {};
-            headers.forEach(h => { if (h.enabled && h.key) requestHeaders[h.key] = h.value; });
-            const options: RequestInit = { method, headers: requestHeaders };
+            resolvedHeaders.forEach(h => { if (h.enabled && h.key) requestHeaders[h.key] = h.value; });
+            const options: RequestInit = { method, headers: requestHeaders, credentials: sendCredentials ? 'include' : 'omit' };
             if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method) && body) options.body = body;
 
             const res = await fetch(url, options);
@@ -87,13 +259,19 @@ export default function ApiClient() {
             setStats({ status: res.status, time: Math.round(endTime - startTime), size: (new Blob([data]).size / 1024).toFixed(2) + ' KB' });
             try { setResponse(JSON.parse(data)); } catch { setResponse(data); }
         } catch (e: unknown) {
-            setError(e instanceof Error ? e.message : String(e));
+            const rawMessage = e instanceof Error ? e.message : String(e);
+            const maybeCors = rawMessage.includes('Failed to fetch') || rawMessage.includes('NetworkError');
+            setError(
+                maybeCors
+                    ? 'Request blocked by browser (likely CORS). Allow this app origin in backend CORS, allow Authorization header, and allow OPTIONS preflight.'
+                    : rawMessage
+            );
         } finally {
             setIsLoading(false);
             const entry: HistoryEntry = { id: Math.random().toString(36).slice(2), method, url, status: finalStatus, timestamp: Date.now() };
             setHistory(prev => [entry, ...prev].slice(0, 20));
         }
-    }, [url, method, headers, body, setHistory]);
+    }, [url, method, headers, body, setHistory, applyBearerTokenHeader, sendCredentials]);
 
     const handleSave = () => {
         const name = saveName.trim() || `${method} ${url.slice(0, 40)}`;
@@ -133,6 +311,10 @@ export default function ApiClient() {
                         className={cn("flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded-lg transition-colors", panel === 'saved' ? 'bg-primary text-primary-foreground' : 'bg-secondary text-secondary-foreground hover:bg-secondary/80')}>
                         <Bookmark size={13} /> Saved
                     </button>
+                    <button onClick={() => setPanel(panel === 'openapi' ? 'none' : 'openapi')}
+                        className={cn("flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded-lg transition-colors", panel === 'openapi' ? 'bg-primary text-primary-foreground' : 'bg-secondary text-secondary-foreground hover:bg-secondary/80')}>
+                        <FileJson size={13} /> OpenAPI
+                    </button>
                     <button onClick={sendRequest} disabled={isLoading || !url}
                         className="flex items-center gap-2 px-4 py-1.5 text-xs font-bold bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-all shadow-lg shadow-primary/20">
                         {isLoading ? <Clock className="animate-spin" size={14} /> : <Send size={14} />}
@@ -147,7 +329,7 @@ export default function ApiClient() {
                     <div className="w-72 border-r flex flex-col bg-background shrink-0">
                         <div className="flex items-center justify-between px-3 py-2 border-b bg-secondary/20">
                             <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
-                                {panel === 'history' ? 'Request History' : 'Saved Requests'}
+                                {panel === 'history' ? 'Request History' : panel === 'saved' ? 'Saved Requests' : 'OpenAPI Import'}
                             </span>
                             <button onClick={() => setPanel('none')} className="text-muted-foreground hover:text-foreground"><X size={14} /></button>
                         </div>
@@ -193,6 +375,80 @@ export default function ApiClient() {
                                         </div>
                                     ))
                             )}
+                            {panel === 'openapi' && (
+                                <div className="p-3 space-y-3">
+                                    <div className="space-y-1">
+                                        <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Spec URL</p>
+                                        <div className="flex gap-1.5">
+                                            <input
+                                                type="text"
+                                                value={openApiUrl}
+                                                onChange={(e) => setOpenApiUrl(e.target.value)}
+                                                placeholder="https://api.example.com/openapi.json"
+                                                className="flex-1 bg-secondary border-none rounded px-2 py-1.5 text-xs outline-none"
+                                            />
+                                            <button
+                                                onClick={loadOpenApiFromUrl}
+                                                className="px-2 py-1.5 text-[10px] font-semibold bg-primary text-primary-foreground rounded hover:bg-primary/90 transition-colors"
+                                            >
+                                                Load
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <div className="space-y-1">
+                                        <div className="flex items-center justify-between">
+                                            <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">OpenAPI JSON/YAML</p>
+                                            <button
+                                                onClick={() => parseOpenApiText(openApiText)}
+                                                className="px-2 py-1 text-[10px] font-semibold bg-secondary text-secondary-foreground rounded hover:bg-secondary/80 transition-colors"
+                                            >
+                                                Parse
+                                            </button>
+                                        </div>
+                                        <textarea
+                                            value={openApiText}
+                                            onChange={(e) => setOpenApiText(e.target.value)}
+                                            placeholder="Paste OpenAPI spec here..."
+                                            className="w-full h-24 bg-secondary border-none rounded px-2 py-1.5 text-xs font-mono outline-none resize-y"
+                                        />
+                                    </div>
+                                    {openApiBaseUrl && (
+                                        <p className="text-[10px] text-muted-foreground">
+                                            Base URL: <span className="font-mono">{openApiBaseUrl}</span>
+                                        </p>
+                                    )}
+                                    {openApiError && <p className="text-[10px] text-destructive">{openApiError}</p>}
+                                    <div className="space-y-1.5">
+                                        <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                                            Operations ({openApiOps.length})
+                                        </p>
+                                        <div className="space-y-1 max-h-72 overflow-auto">
+                                            {openApiOps.length === 0 ? (
+                                                <p className="text-xs text-muted-foreground">No operations loaded yet.</p>
+                                            ) : (
+                                                openApiOps.map((operation) => (
+                                                    <button
+                                                        key={operation.id}
+                                                        onClick={() => applyOpenApiOperation(operation)}
+                                                        className="w-full text-left p-2 rounded border hover:bg-secondary/30 transition-colors"
+                                                    >
+                                                        <div className="flex items-center gap-2">
+                                                            <span className={cn('text-[10px] font-bold', METHOD_COLORS[operation.method] ?? 'text-muted-foreground')}>
+                                                                {operation.method}
+                                                            </span>
+                                                            <span className="text-[11px] font-mono truncate">{operation.path}</span>
+                                                        </div>
+                                                        <p className="text-[10px] text-muted-foreground truncate mt-0.5">
+                                                            {operation.name}
+                                                            {operation.tags.length > 0 ? ` • ${operation.tags.join(', ')}` : ''}
+                                                        </p>
+                                                    </button>
+                                                ))
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
                         </div>
                     </div>
                 )}
@@ -221,6 +477,28 @@ export default function ApiClient() {
                                 placeholder="https://api.example.com/v1/resource"
                                 className="flex-1 bg-secondary border-none rounded-lg px-4 py-2 text-sm focus:ring-2 ring-primary/20 outline-none" />
                         </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-[1fr_auto] gap-2 items-center">
+                            <input
+                                type="password"
+                                value={bearerToken}
+                                onChange={(e) => setBearerToken(e.target.value)}
+                                placeholder="Bearer token (optional)"
+                                className="bg-secondary border-none rounded-lg px-3 py-2 text-xs outline-none"
+                            />
+                            <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                                <input
+                                    type="checkbox"
+                                    checked={sendCredentials}
+                                    onChange={(e) => setSendCredentials(e.target.checked)}
+                                    className="rounded border-secondary bg-secondary text-primary focus:ring-0"
+                                />
+                                Send cookies
+                            </label>
+                        </div>
+                        <p className="text-[10px] text-muted-foreground">
+                            Bearer token auto-adds an <span className="font-mono">Authorization</span> header at send time.
+                        </p>
 
                         <div className="space-y-4">
                             <div className="flex items-center justify-between">
