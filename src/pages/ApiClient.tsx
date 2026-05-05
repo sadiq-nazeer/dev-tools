@@ -1,5 +1,5 @@
-import { useState, useCallback } from 'react';
-import { Send, Plus, Trash2, Clock, BookmarkPlus, History, Bookmark, X, FileJson } from 'lucide-react';
+import { useState, useCallback, useMemo } from 'react';
+import { Send, Plus, Trash2, Clock, BookmarkPlus, History, Bookmark, X, FileJson, ChevronDown, ChevronRight } from 'lucide-react';
 import { ToolLayout } from '../components/layout/ToolLayout';
 import { usePersistentState } from '../hooks/usePersistentState';
 import { useToolPageMeta } from '../hooks/useToolPageMeta';
@@ -52,6 +52,10 @@ interface OpenApiOperation {
 
 interface OpenApiParseResult {
     baseUrl: string;
+    operations: OpenApiOperation[];
+}
+interface OpenApiOperationGroup {
+    tag: string;
     operations: OpenApiOperation[];
 }
 
@@ -170,6 +174,8 @@ export default function ApiClient() {
     const [openApiBaseUrl, setOpenApiBaseUrl] = useState('');
     const [openApiOps, setOpenApiOps] = useState<OpenApiOperation[]>([]);
     const [openApiError, setOpenApiError] = useState<string | null>(null);
+    const [collapsedTags, setCollapsedTags] = useState<Record<string, boolean>>({});
+    const [openApiImportCollapsed, setOpenApiImportCollapsed] = useState(false);
     const [bearerToken, setBearerToken] = usePersistentState<string>('api_bearer_token', '');
     const [sendCredentials, setSendCredentials] = usePersistentState<boolean>('api_send_credentials', false);
 
@@ -226,10 +232,17 @@ export default function ApiClient() {
             const result = parseOpenApiDocument(parsed);
             setOpenApiBaseUrl(result.baseUrl);
             setOpenApiOps(result.operations);
+            const nextCollapsed: Record<string, boolean> = {};
+            result.operations.forEach((operation) => {
+                const groupTag = operation.tags[0]?.trim() || 'Untagged';
+                if (!(groupTag in nextCollapsed)) nextCollapsed[groupTag] = true;
+            });
+            setCollapsedTags(nextCollapsed);
             setOpenApiError(result.operations.length ? null : 'No operations found in spec.');
         } catch (e: unknown) {
             setOpenApiOps([]);
             setOpenApiBaseUrl('');
+            setCollapsedTags({});
             setOpenApiError(e instanceof Error ? e.message : 'Failed to parse OpenAPI spec.');
         }
     };
@@ -251,9 +264,21 @@ export default function ApiClient() {
         } catch (e: unknown) {
             setOpenApiOps([]);
             setOpenApiBaseUrl('');
+            setCollapsedTags({});
             setOpenApiError(e instanceof Error ? e.message : 'Failed to fetch OpenAPI URL.');
         }
     };
+
+    const groupedOpenApiOps = useMemo<OpenApiOperationGroup[]>(() => {
+        const groups = new Map<string, OpenApiOperation[]>();
+        openApiOps.forEach((operation) => {
+            const groupTag = operation.tags[0]?.trim() || 'Untagged';
+            const existing = groups.get(groupTag);
+            if (existing) existing.push(operation);
+            else groups.set(groupTag, [operation]);
+        });
+        return Array.from(groups.entries()).map(([tag, operations]) => ({ tag, operations }));
+    }, [openApiOps]);
 
     const sendRequest = useCallback(async () => {
         setIsLoading(true);
@@ -415,41 +440,57 @@ export default function ApiClient() {
                                     ))
                             )}
                             {panel === 'openapi' && (
-                                <div className="p-3 space-y-3">
-                                    <div className="space-y-1">
-                                        <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Spec URL</p>
-                                        <div className="flex gap-1.5">
-                                            <input
-                                                type="text"
-                                                value={openApiUrl}
-                                                onChange={(e) => setOpenApiUrl(e.target.value)}
-                                                placeholder="https://api.example.com/openapi.json"
-                                                className="flex-1 bg-secondary border-none rounded px-2 py-1.5 text-xs outline-none"
-                                            />
-                                            <button
-                                                onClick={loadOpenApiFromUrl}
-                                                className="px-2 py-1.5 text-[10px] font-semibold bg-primary text-primary-foreground rounded hover:bg-primary/90 transition-colors"
-                                            >
-                                                Load
-                                            </button>
-                                        </div>
-                                    </div>
-                                    <div className="space-y-1">
-                                        <div className="flex items-center justify-between">
-                                            <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">OpenAPI JSON/YAML</p>
-                                            <button
-                                                onClick={() => parseOpenApiText(openApiText)}
-                                                className="px-2 py-1 text-[10px] font-semibold bg-secondary text-secondary-foreground rounded hover:bg-secondary/80 transition-colors"
-                                            >
-                                                Parse
-                                            </button>
-                                        </div>
-                                        <textarea
-                                            value={openApiText}
-                                            onChange={(e) => setOpenApiText(e.target.value)}
-                                            placeholder="Paste OpenAPI spec here..."
-                                            className="w-full h-24 bg-secondary border-none rounded px-2 py-1.5 text-xs font-mono outline-none resize-y"
-                                        />
+                                <div className="p-3 h-full flex flex-col min-h-0 gap-3">
+                                    <div className="border rounded">
+                                        <button
+                                            type="button"
+                                            onClick={() => setOpenApiImportCollapsed((prev) => !prev)}
+                                            className="w-full flex items-center justify-between px-2 py-1.5 bg-secondary/20 hover:bg-secondary/30 transition-colors"
+                                        >
+                                            <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">OpenAPI Import</span>
+                                            <span className="inline-flex items-center justify-center h-5 w-5 rounded bg-background/70 text-foreground border border-border/70">
+                                                {openApiImportCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+                                            </span>
+                                        </button>
+                                        {!openApiImportCollapsed && (
+                                            <div className="p-2 space-y-3">
+                                                <div className="space-y-1">
+                                                    <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Spec URL</p>
+                                                    <div className="flex gap-1.5">
+                                                        <input
+                                                            type="text"
+                                                            value={openApiUrl}
+                                                            onChange={(e) => setOpenApiUrl(e.target.value)}
+                                                            placeholder="https://api.example.com/openapi.json"
+                                                            className="flex-1 bg-secondary border-none rounded px-2 py-1.5 text-xs outline-none"
+                                                        />
+                                                        <button
+                                                            onClick={loadOpenApiFromUrl}
+                                                            className="px-2 py-1.5 text-[10px] font-semibold bg-primary text-primary-foreground rounded hover:bg-primary/90 transition-colors"
+                                                        >
+                                                            Load
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                                <div className="space-y-1">
+                                                    <div className="flex items-center justify-between">
+                                                        <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">OpenAPI JSON/YAML</p>
+                                                        <button
+                                                            onClick={() => parseOpenApiText(openApiText)}
+                                                            className="px-2 py-1 text-[10px] font-semibold bg-secondary text-secondary-foreground rounded hover:bg-secondary/80 transition-colors"
+                                                        >
+                                                            Parse
+                                                        </button>
+                                                    </div>
+                                                    <textarea
+                                                        value={openApiText}
+                                                        onChange={(e) => setOpenApiText(e.target.value)}
+                                                        placeholder="Paste OpenAPI spec here..."
+                                                        className="w-full h-24 bg-secondary border-none rounded px-2 py-1.5 text-xs font-mono outline-none resize-y"
+                                                    />
+                                                </div>
+                                            </div>
+                                        )}
                                     </div>
                                     {openApiBaseUrl && (
                                         <p className="text-[10px] text-muted-foreground">
@@ -457,31 +498,46 @@ export default function ApiClient() {
                                         </p>
                                     )}
                                     {openApiError && <p className="text-[10px] text-destructive">{openApiError}</p>}
-                                    <div className="space-y-1.5">
+                                    <div className="space-y-1.5 flex-1 min-h-0 flex flex-col">
                                         <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
                                             Operations ({openApiOps.length})
                                         </p>
-                                        <div className="space-y-1 max-h-72 overflow-auto">
+                                        <div className="space-y-1 flex-1 min-h-0 overflow-auto">
                                             {openApiOps.length === 0 ? (
                                                 <p className="text-xs text-muted-foreground">No operations loaded yet.</p>
                                             ) : (
-                                                openApiOps.map((operation) => (
-                                                    <button
-                                                        key={operation.id}
-                                                        onClick={() => applyOpenApiOperation(operation)}
-                                                        className="w-full text-left p-2 rounded border hover:bg-secondary/30 transition-colors"
-                                                    >
-                                                        <div className="flex items-center gap-2">
-                                                            <span className={cn('text-[10px] font-bold', METHOD_COLORS[operation.method] ?? 'text-muted-foreground')}>
-                                                                {operation.method}
-                                                            </span>
-                                                            <span className="text-[11px] font-mono truncate">{operation.path}</span>
-                                                        </div>
-                                                        <p className="text-[10px] text-muted-foreground truncate mt-0.5">
-                                                            {operation.name}
-                                                            {operation.tags.length > 0 ? ` • ${operation.tags.join(', ')}` : ''}
-                                                        </p>
-                                                    </button>
+                                                groupedOpenApiOps.map((group) => (
+                                                    <div key={group.tag} className="border rounded">
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => setCollapsedTags((prev) => ({ ...prev, [group.tag]: !(prev[group.tag] ?? true) }))}
+                                                            className="w-full flex items-center justify-between px-2 py-1.5 text-left bg-secondary/20 hover:bg-secondary/30 transition-colors"
+                                                        >
+                                                            <span className="text-[10px] font-bold uppercase tracking-wide">{group.tag}</span>
+                                                            <span className="text-[10px] text-muted-foreground">{(collapsedTags[group.tag] ?? true) ? '+' : '-'} {group.operations.length}</span>
+                                                        </button>
+                                                        {!(collapsedTags[group.tag] ?? true) && (
+                                                            <div className="space-y-1 p-1.5">
+                                                                {group.operations.map((operation) => (
+                                                                    <button
+                                                                        key={operation.id}
+                                                                        onClick={() => applyOpenApiOperation(operation)}
+                                                                        className="w-full text-left p-2 rounded border hover:bg-secondary/30 transition-colors"
+                                                                    >
+                                                                        <div className="flex items-center gap-2">
+                                                                            <span className={cn('text-[10px] font-bold', METHOD_COLORS[operation.method] ?? 'text-muted-foreground')}>
+                                                                                {operation.method}
+                                                                            </span>
+                                                                            <span className="text-[11px] font-mono truncate">{operation.path}</span>
+                                                                        </div>
+                                                                        <p className="text-[10px] text-muted-foreground truncate mt-0.5">
+                                                                            {operation.name}
+                                                                        </p>
+                                                                    </button>
+                                                                ))}
+                                                            </div>
+                                                        )}
+                                                    </div>
                                                 ))
                                             )}
                                         </div>
