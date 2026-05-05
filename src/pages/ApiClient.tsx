@@ -1,5 +1,5 @@
 import { useState, useCallback, useMemo, useEffect } from 'react';
-import { Send, Plus, Trash2, Clock, History, Bookmark, X, FileJson, ChevronDown, ChevronRight, Copy, Check, Eye, EyeOff } from 'lucide-react';
+import { Send, Plus, Trash2, Clock, History, Bookmark, X, FileJson, ChevronDown, ChevronRight, ChevronLeft, Copy, Check, Eye, EyeOff } from 'lucide-react';
 import { ToolLayout } from '../components/layout/ToolLayout';
 import { usePersistentState } from '../hooks/usePersistentState';
 import { useToolPageMeta } from '../hooks/useToolPageMeta';
@@ -252,6 +252,7 @@ export default function ApiClient() {
     const [customTitle, setCustomTitle] = useState('');
     const [isEditingTitle, setIsEditingTitle] = useState(false);
     const [titleDraft, setTitleDraft] = useState('');
+    const [isSideNavExpanded, setIsSideNavExpanded] = usePersistentState<boolean>('api_sidenav_expanded', true);
 
     const addHeader = () => setHeaders([...headers, { id: Math.random().toString(36).substr(2, 9), key: '', value: '', enabled: true }]);
     const removeHeader = (id: string) => setHeaders(headers.filter(h => h.id !== id));
@@ -543,6 +544,10 @@ export default function ApiClient() {
 
     const deleteHistory = (id: string) => setHistory(prev => prev.filter(h => h.id !== id));
     const deleteSaved = (id: string) => setSaved(prev => prev.filter(s => s.id !== id));
+    const togglePanel = (nextPanel: 'history' | 'saved' | 'openapi') => {
+        setPanel((prev) => (prev === nextPanel ? 'none' : nextPanel));
+        if (!isSideNavExpanded) setIsSideNavExpanded(true);
+    };
 
     const copyResponse = () => {
         if (response === null) return;
@@ -580,15 +585,15 @@ export default function ApiClient() {
             error={error}
             actions={
                 <div className="flex items-center gap-2">
-                    <button onClick={() => setPanel(panel === 'history' ? 'none' : 'history')}
+                    <button onClick={() => togglePanel('history')}
                         className={cn("flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded-lg transition-colors", panel === 'history' ? 'bg-primary text-primary-foreground' : 'bg-secondary text-secondary-foreground hover:bg-secondary/80')}>
                         <History size={13} /> History
                     </button>
-                    <button onClick={() => setPanel(panel === 'saved' ? 'none' : 'saved')}
+                    <button onClick={() => togglePanel('saved')}
                         className={cn("flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded-lg transition-colors", panel === 'saved' ? 'bg-primary text-primary-foreground' : 'bg-secondary text-secondary-foreground hover:bg-secondary/80')}>
                         <Bookmark size={13} /> Saved
                     </button>
-                    <button onClick={() => setPanel(panel === 'openapi' ? 'none' : 'openapi')}
+                    <button onClick={() => togglePanel('openapi')}
                         className={cn("flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded-lg transition-colors", panel === 'openapi' ? 'bg-primary text-primary-foreground' : 'bg-secondary text-secondary-foreground hover:bg-secondary/80')}>
                         <FileJson size={13} /> OpenAPI
                     </button>
@@ -596,16 +601,124 @@ export default function ApiClient() {
             }
         >
             <div className="h-full flex overflow-hidden">
-                {/* Side Panel */}
-                {panel !== 'none' && (
-                    <div className="w-72 border-r flex flex-col bg-background shrink-0">
-                        <div className="flex items-center justify-between px-3 py-2 border-b bg-secondary/20">
-                            <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
-                                {panel === 'history' ? 'Request History' : panel === 'saved' ? 'Saved Requests' : 'OpenAPI Import'}
-                            </span>
-                            <button onClick={() => setPanel('none')} className="text-muted-foreground hover:text-foreground"><X size={14} /></button>
+                <div className={cn(
+                    'border-r bg-card/30 shrink-0 flex flex-col transition-all duration-200',
+                    isSideNavExpanded ? 'w-72' : 'w-14'
+                )}>
+                    <div className="px-2 py-2 border-b">
+                        <div className={cn('flex items-center', isSideNavExpanded ? 'justify-between' : 'justify-center')}>
+                            {isSideNavExpanded && (
+                                <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                                    API Workspace
+                                </span>
+                            )}
+                            <button
+                                type="button"
+                                onClick={() => setIsSideNavExpanded((prev) => !prev)}
+                                className="h-7 w-7 inline-flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary/70 transition-colors"
+                                title={isSideNavExpanded ? 'Collapse sidebar' : 'Expand sidebar'}
+                            >
+                                {isSideNavExpanded ? <ChevronLeft size={14} /> : <ChevronRight size={14} />}
+                            </button>
                         </div>
-                        <div className="flex-1 overflow-auto">
+                    </div>
+
+                    {!isSideNavExpanded && (
+                        <>
+                            <div className="p-2 border-b space-y-2">
+                                <button
+                                    onClick={() => togglePanel('history')}
+                                    title="History"
+                                    className={cn(
+                                        'w-full rounded-lg px-2.5 py-2 text-xs transition-colors inline-flex items-center justify-center',
+                                        panel === 'history'
+                                            ? 'bg-primary text-primary-foreground shadow-sm'
+                                            : 'text-muted-foreground hover:text-foreground hover:bg-secondary/70'
+                                    )}
+                                >
+                                    <History size={14} />
+                                </button>
+                                <button
+                                    onClick={() => togglePanel('saved')}
+                                    title="Saved Requests"
+                                    className={cn(
+                                        'w-full rounded-lg px-2.5 py-2 text-xs transition-colors inline-flex items-center justify-center',
+                                        panel === 'saved'
+                                            ? 'bg-primary text-primary-foreground shadow-sm'
+                                            : 'text-muted-foreground hover:text-foreground hover:bg-secondary/70'
+                                    )}
+                                >
+                                    <Bookmark size={14} />
+                                </button>
+                            </div>
+
+                            <div className="p-2 border-b space-y-2">
+                                <button
+                                    onClick={() => togglePanel('openapi')}
+                                    title="OpenAPI"
+                                    className={cn(
+                                        'w-full rounded-lg px-2.5 py-2 text-xs transition-colors inline-flex items-center justify-center',
+                                        panel === 'openapi'
+                                            ? 'bg-primary text-primary-foreground shadow-sm'
+                                            : 'text-muted-foreground hover:text-foreground hover:bg-secondary/70'
+                                    )}
+                                >
+                                    <FileJson size={14} />
+                                </button>
+                            </div>
+                        </>
+                    )}
+
+                    {isSideNavExpanded && panel !== 'none' && (
+                        <div className="px-3 py-2.5 border-b bg-gradient-to-r from-secondary/40 via-secondary/20 to-transparent">
+                            <div className="mb-2 grid grid-cols-3 gap-1.5 w-full">
+                                <button
+                                    onClick={() => togglePanel('history')}
+                                    className={cn(
+                                        'w-full px-2 py-1 rounded-md text-[10px] font-semibold transition-colors',
+                                        panel === 'history'
+                                            ? 'bg-primary text-primary-foreground'
+                                            : 'bg-secondary/60 text-muted-foreground hover:text-foreground hover:bg-secondary'
+                                    )}
+                                >
+                                    History
+                                </button>
+                                <button
+                                    onClick={() => togglePanel('saved')}
+                                    className={cn(
+                                        'w-full px-2 py-1 rounded-md text-[10px] font-semibold transition-colors',
+                                        panel === 'saved'
+                                            ? 'bg-primary text-primary-foreground'
+                                            : 'bg-secondary/60 text-muted-foreground hover:text-foreground hover:bg-secondary'
+                                    )}
+                                >
+                                    Saved
+                                </button>
+                                <button
+                                    onClick={() => togglePanel('openapi')}
+                                    className={cn(
+                                        'w-full px-2 py-1 rounded-md text-[10px] font-semibold transition-colors',
+                                        panel === 'openapi'
+                                            ? 'bg-primary text-primary-foreground'
+                                            : 'bg-secondary/60 text-muted-foreground hover:text-foreground hover:bg-secondary'
+                                    )}
+                                >
+                                    OpenAPI
+                                </button>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <span className="inline-flex h-7 w-7 items-center justify-center rounded-md bg-background/90 border border-border/70 text-foreground">
+                                    {panel === 'history' ? <History size={14} /> : panel === 'saved' ? <Bookmark size={14} /> : <FileJson size={14} />}
+                                </span>
+                                <span className="text-sm font-semibold text-foreground">
+                                    {panel === 'history' ? 'History' : panel === 'saved' ? 'Saved Requests' : 'OpenAPI'}
+                                </span>
+                            </div>
+                        </div>
+                    )}
+
+                    {isSideNavExpanded && panel !== 'none' && (
+                        <div className="flex-1 min-h-0 overflow-auto">
                             {panel === 'history' && (
                                 history.length === 0
                                     ? <p className="p-4 text-xs text-muted-foreground">No history yet. Send a request!</p>
@@ -788,8 +901,8 @@ export default function ApiClient() {
                                 </div>
                             )}
                         </div>
-                    </div>
-                )}
+                    )}
+                </div>
 
                 <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
                     <div className="p-4 border-b bg-card space-y-4">
