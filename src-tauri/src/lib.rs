@@ -19,9 +19,16 @@ struct NativeHeader {
 }
 
 #[derive(Debug, Serialize)]
+struct NativeResponseHeader {
+  key: String,
+  value: String,
+}
+
+#[derive(Debug, Serialize)]
 struct NativeResponsePayload {
   status: u16,
   body: String,
+  headers: Vec<NativeResponseHeader>,
 }
 
 #[tauri::command]
@@ -47,8 +54,16 @@ async fn send_native_request(payload: NativeRequestPayload) -> Result<NativeResp
 
   let response = request.send().await.map_err(|e| e.to_string())?;
   let status = response.status().as_u16();
+  let headers = response
+    .headers()
+    .iter()
+    .map(|(key, value)| NativeResponseHeader {
+      key: key.to_string(),
+      value: value.to_str().unwrap_or_default().to_string(),
+    })
+    .collect();
   let body = response.text().await.map_err(|e| e.to_string())?;
-  Ok(NativeResponsePayload { status, body })
+  Ok(NativeResponsePayload { status, body, headers })
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
