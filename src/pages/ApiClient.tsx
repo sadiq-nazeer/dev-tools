@@ -6,8 +6,21 @@ import { useToolPageMeta } from '../hooks/useToolPageMeta';
 import Editor from '@monaco-editor/react';
 import { cn } from '../lib/utils';
 import { load as parseYaml } from 'js-yaml';
+import { invoke } from '@tauri-apps/api/core';
 
 interface Header { id: string; key: string; value: string; enabled: boolean }
+interface NativeRequestPayload {
+    method: string;
+    url: string;
+    headers: Array<{ key: string; value: string; enabled: boolean }>;
+    body?: string;
+    sendCredentials: boolean;
+}
+
+interface NativeResponsePayload {
+    status: number;
+    body: string;
+}
 
 interface HistoryEntry {
     id: string;
@@ -129,6 +142,11 @@ function parseOpenApiDocument(doc: unknown): OpenApiParseResult {
     return { baseUrl, operations };
 }
 
+function isDesktopTauriRuntime(): boolean {
+    if (typeof window === 'undefined') return false;
+    return '__TAURI_INTERNALS__' in window;
+}
+
 export default function ApiClient() {
     const meta = useToolPageMeta();
     const [url, setUrl] = usePersistentState<string>('api_url', 'https://jsonplaceholder.typicode.com/todos/1');
@@ -248,15 +266,36 @@ export default function ApiClient() {
             const resolvedHeaders = applyBearerTokenHeader(headers);
             const requestHeaders: Record<string, string> = {};
             resolvedHeaders.forEach(h => { if (h.enabled && h.key) requestHeaders[h.key] = h.value; });
-            const options: RequestInit = { method, headers: requestHeaders, credentials: sendCredentials ? 'include' : 'omit' };
-            if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method) && body) options.body = body;
+            let status: number;
+            let data: string;
 
-            const res = await fetch(url, options);
-            const data = await res.text();
+            if (isDesktopTauriRuntime()) {
+                const payload: NativeRequestPayload = {
+                    method,
+                    url,
+                    headers: resolvedHeaders.map((header) => ({
+                        key: header.key,
+                        value: header.value,
+                        enabled: header.enabled,
+                    })),
+                    body: ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method) && body ? body : undefined,
+                    sendCredentials,
+                };
+                const nativeRes = await invoke<NativeResponsePayload>('send_native_request', { payload });
+                status = nativeRes.status;
+                data = nativeRes.body;
+            } else {
+                const options: RequestInit = { method, headers: requestHeaders, credentials: sendCredentials ? 'include' : 'omit' };
+                if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method) && body) options.body = body;
+                const res = await fetch(url, options);
+                status = res.status;
+                data = await res.text();
+            }
+
             const endTime = performance.now();
-            finalStatus = res.status;
+            finalStatus = status;
 
-            setStats({ status: res.status, time: Math.round(endTime - startTime), size: (new Blob([data]).size / 1024).toFixed(2) + ' KB' });
+            setStats({ status, time: Math.round(endTime - startTime), size: (new Blob([data]).size / 1024).toFixed(2) + ' KB' });
             try { setResponse(JSON.parse(data)); } catch { setResponse(data); }
         } catch (e: unknown) {
             const rawMessage = e instanceof Error ? e.message : String(e);
